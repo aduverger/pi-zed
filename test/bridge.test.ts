@@ -89,6 +89,7 @@ test("real socket discovery, explicit attachment, streaming and terminal continu
   const response = f.prompt("Remember emerald-73");
   await until(() => f.submissions.length === 1);
   assert.match(f.submissions[0]!, /Remember emerald-73/);
+  assert(!f.submissions[0]!.includes("[Zed discussion"));
   await f.start();
   await f.reply("Remembered emerald-73");
   await f.settle();
@@ -355,7 +356,7 @@ test("disconnect drops a waiting prompt without touching terminal work", async (
 
 function reviewPrompt(f: Awaited<ReturnType<typeof fixture>>, submissionId: string, sessionId = f.id) {
   return f.connection.agent.request(acp.methods.agent.session.prompt, {
-    sessionId, prompt: [{ type: "text", text: "Review /project/example.ts:2-3\nconst answer = 42;\nExplain this.",
+    sessionId, prompt: [{ type: "text", text: "[Zed discussion thread-1]\n\nReview /project/example.ts:2-3\nconst answer = 42;\nExplain this.",
       _meta: { [REVIEW_META_KEY]: { version: 1, threadId: "thread-1", submissionId } } }],
   });
 }
@@ -368,6 +369,8 @@ test("inline replies carry exact IDs and only final completed text after settlin
     const result = reviewPrompt(f, id);
     await until(() => f.submissions.length === count + 1);
     assert.match(f.submissions.at(-1)!, /const answer = 42/);
+    assert.match(f.submissions.at(-1)!, /\[Zed discussion thread-1\]/);
+    assert.equal(f.submissions.at(-1)!.split("[Zed discussion").length, 2);
     await f.start();
     await f.reply("intermediate text");
     await f.emit("agent_end", { messages: [] });

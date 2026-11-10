@@ -1,6 +1,8 @@
 # PR 2: Two-way review threads in Zed editors and diffs
 
-Status: regular-file vertical slice implemented locally; manual end-to-end UI acceptance pending.
+Status: regular-file vertical slice manually confirmed by the user. Separate authored replies,
+Markdown, stable discussions, and queued posting are implemented locally; manual acceptance
+of these refinements is pending.
 Diff-side anchoring and persistence are not implemented. PR 1 attachment and the unmodified
 custom macOS build/SSH connection were confirmed by the user.
 
@@ -30,7 +32,7 @@ The bridge changes live in this repository on `feat/regular-file-review`.
    Resolve only unique matches after reopening; never silently jump to a similar line.
 4. Persist threads and replies through Zed's workspace persistence. Do not put annotations
    into source files. Keep original excerpts when code changes.
-5. Posting sends immediately to the selected live session. Carry thread and submission IDs
+5. Posting automatically queues for the selected live session. Carry discussion and submission IDs
    through an explicit, versioned ACP extension shared with PR 1's bridge. Do not infer
    reply ownership from prose or from whichever editor is focused.
 6. Route replies into the originating thread. Keep terminal/unrelated messages in the main
@@ -56,7 +58,8 @@ or a replacement review panel.
 - Upstream contribution versus maintained fork (the stable release/custom build is approved).
 - Thread retention scope (workspace-local proposed), deletion/resolution UX, and handling
   multiple-file selections (split versus reject).
-- Whether one agent response may address several threads or each submission is serialized.
+- Queue coordination across multiple independently attached Zed threads/processes (currently
+  one FIFO per attached Agent Panel thread; the bridge still permits one pending request).
 - How to expose cancellation of the shared agent when terminal work may also be affected.
 
 ## First vertical slice
@@ -66,8 +69,12 @@ In the custom Zed build:
 1. Attach the Agent Panel to `pi-live` (the configured agent key must be exactly `pi-live`).
 2. Open a regular saved file, select one contiguous range, then use the command palette:
    **agent: comment with pi live**.
-3. Type the comment in the inline overlay and press Enter. Posting sends immediately.
-4. The final reply appears below that comment; streaming remains in the Agent Panel.
+3. Type the comment in the inline overlay and press Enter. Posting queues automatically.
+4. Your comment keeps your avatar; the final reply gets a separate **Pi** row with an agent
+   icon and Markdown formatting. Streaming remains in the Agent Panel.
+5. Post more comments while waiting: they show **Queued**, then **Running**, then **Answered**
+   or an error. Each queued comment has its own cancellation button; cancelling it does not
+   interrupt the running pi request.
 
 The source path is absolute on the file's host, including SSH files. The request includes
 full selected lines, one-based line numbers, and the current editor snapshot (which may
@@ -79,42 +86,95 @@ the editor remains open.
 
 The existing editor review overlay stores the comment and renders the final reply. The
 agent integration captures the active pi-live thread when the overlay opens and uses
-`AcpThread::send`, not a parallel transport. Each posted comment receives fresh UUID thread
-and submission IDs. The text content block carries `_meta["zed-pi-live/review"]`:
+`AcpThread::send`, not a parallel transport. Each posted comment receives a fresh submission
+UUID. Posts on the same anchored range reuse a discussion UUID, including after dismissing
+and reopening the overlay while the editor remains open. The existing wire field `threadId`
+now holds that stable discussion ID; no protocol version change is necessary. The text
+content block carries `_meta["zed-pi-live/review"]`:
 
 ```json
-{"version": 1, "threadId": "uuid", "submissionId": "uuid"}
+{"version": 1, "threadId": "discussion-uuid", "submissionId": "submission-uuid"}
 ```
 
+The model-visible prompt also contains `[Zed discussion <id>]`, derived from the same ID.
+Pi can associate follow-ups with earlier turns in its existing session context; the entire
+history is not pasted into each request. An ID is not history retrieval: compaction or a
+session switch can lose earlier context, and no retrieval mechanism is implemented yet.
+Zed builds this prompt header; the existing remote bridge needs no runtime update.
+
 A successful `end_turn` prompt response returns those IDs plus `text` under the same key.
-Missing/mismatched metadata, cancellation, disconnection, or provider failure produces an
-inline error; there is no automatic retry. The extension captures completed assistant text
+Missing/mismatched metadata, disconnection, or provider failure produces an inline error;
+cancellation is labeled separately. There is no automatic retry. The extension captures completed assistant text
 and responds only after `agent_settled`. User/custom-message interleaving during the review
 causes an attribution error rather than putting an unrelated answer under the code.
 
 Buffer anchors preserve the selection across edits before it. Changed selected text renders
 an **Outdated** warning with the original excerpt and retains the reply. This is an in-memory
 prototype: closing the editor or restarting Zed loses comments. There is no persistent
-thread store, follow-up conversation grouping, retry reconciliation, diff-side support,
+thread store, history retrieval after compaction, retry reconciliation, diff-side support,
 rename/reopen reanchoring, or reattachment UI yet. **This does not complete PR 2.**
+
+### Queue ownership and safety
+
+`AcpThread::send` cancels an existing legacy ACP turn, so concurrent calls are not a safe
+way to enqueue comments at the bridge. Inline reviews wait in a Zed-owned FIFO keyed by
+`AcpThread` entity, and dispatch only when the thread is idle and no inline review is in
+flight. The native message-editor queue requires message-editor entities and has no inline
+completion ownership; this focused queue uses the same canonical ACP submission path
+without modifying the shared ACP implementation or introducing a second transport.
+
+Scope: one attached Agent Panel thread. Separate threads/adapters aimed at the same pi
+process are not globally queued; the bridge's existing busy error protects the shared run.
+Manual Agent Panel prompts can interrupt a running review through Zed's normal behavior.
+**Running** means dispatched to ACP; the bridge may still be waiting for terminal work.
+
+On a running failure/cancellation, queued comments are retained in the editor but marked
+**Not sent** and removed from the execution queue. They are not auto-retried or automatically
+resumed by later posts. Check the transcript before reposting. Cancelling an individual
+queued comment removes only that job and leaves FIFO order intact. Closing a source editor
+before dispatch drops its unsent jobs; all comments/queues remain in-memory.
 
 ### Validation
 
 - `pnpm check`, `pnpm test` (21 tests), `pnpm build`: passed on macOS.
 - `cargo build --locked`: passed after final changes on Xcode 27.2 / Rust 1.98.1.
 - `cargo test --locked -p editor review --lib`: passed (26 tests, including 2 new tests).
-- `cargo test --locked -p agent_ui inline_review --lib`: passed (1 test).
+- `cargo test --locked -p agent_ui inline_review --lib`: passed (4 tests), covering exact reply correlation,
+  model-visible discussion metadata, FIFO across A/B/follow-up-A, queued cancellation without
+  an ACP cancel call, and failure without sending/retrying remaining jobs.
 - GPUI coverage verifies posting the exact full-line excerpt/path, exclusion of the trailing
   line, retention through edits before selection, outdated detection inside selection, and
-  refusal of unsaved buffers. Protocol tests verify exact IDs, sequential submissions,
+  refusal of unsaved buffers. Follow-up posts share a discussion ID and Pi replies have a
+  distinct author and Markdown entity. Protocol tests verify exact IDs, sequential submissions,
   busy terminal work versus interleaving, cancellation, provider failure and malformed input.
 - The debug linker warns that `__eh_frame` exceeds 16 MiB; build and tests still succeed.
-- Remaining manual check: new action visibility, Enter submission, long/multiline reply
-  layout, SSH file path/excerpt in the actual terminal pi, two different selected ranges,
-  changed-code warning, and failure display. Full repository tests/clippy and a new real
+- The user confirmed the initial end-to-end SSH inline flow. Remaining manual checks:
+  separate Pi author/Markdown layout, burst posting, queued cancellation, discussion headers
+  in terminal pi, two different ranges, changed-code warning, and failure display. Full repository tests/clippy and a new real
   provider smoke test have not been run.
 
-### Slice decision ledger (least-confident first)
+### Discussion/queue refinement decision ledger (least-confident first)
+
+1. A failed/stopped running review marks all remaining queued jobs **Not sent**, rather than
+   automatically proceeding after uncertain delivery. Question: should a later explicit
+   resume action preserve the execution queue instead?
+2. FIFO lives in Zed per attached ACP thread, not globally across clients of a pi process.
+   The existing ACP v1 send path interrupts prior turns; a bridge-only queue cannot fix that.
+   Question: is cross-window/cross-client queue coordination needed beyond this workflow?
+3. A discussion is the existing exact anchored range within one editor. IDs survive overlay
+   dismissal but not editor closure/restart. Switching pi sessions does not restore history.
+4. Keep wire `threadId` as the discussion ID and include it in the prompt built by Zed.
+   This reuses the current protocol and avoids requiring another remote bridge deployment.
+5. Use separate author rows with a Pi label/Sparkle icon and Zed's existing Markdown renderer,
+   rather than real accounts or a second comment UI. Replies remain paired with their posts.
+6. Queue snapshots capture the selected code at posting time, not dispatch time, so intervening
+   code edits cannot silently change what the user submitted. Outdated detection remains active.
+7. Queued cancellation is local and race-safe: once dispatched, a stale cancel click does
+   nothing. Running cancellation stays in the Agent Panel and can affect shared terminal work.
+8. Original selected-agent capture remains unchanged. Pending work retains its target even if
+   the Agent Panel selection changes. Editor closure discards unsent local work.
+
+### Original slice decision ledger (superseded where noted above)
 
 1. Require the existing configured key `pi-live` for this prototype rather than adding a
    new capability-negotiation layer. Question: should renamed bridge registrations be supported?
