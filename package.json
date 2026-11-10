@@ -1,0 +1,36 @@
+{
+  "name": "zed-pi-live",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Attach Zed ACP to a running terminal pi session",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc --noEmit",
+    "test": "tsx --test test/*.test.ts",
+    "test:live": "npm run build && python3 scripts/smoke-tui.py"
+  },
+  "bin": {
+    "zed-pi-live": "dist/cli.js"
+  },
+  "pi": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "2.5.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.1",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
