@@ -7,6 +7,7 @@ import * as acp from "@agentclientprotocol/sdk";
 import { SessionManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createAdapter } from "../src/adapter.js";
 import { installBridge } from "../src/extension.js";
+import { REVIEW_META_KEY } from "../src/review.js";
 import { discoverSessions, privateDirectory, socketPath } from "../src/transport.js";
 
 async function until(predicate: () => boolean): Promise<void> {
@@ -70,7 +71,7 @@ async function fixture(t: TestContext, options: { directory?: string; cwd?: stri
   }
   async function reply(text = "answer", error?: string) {
     await emit("message_update", { assistantMessageEvent: { type: "text_delta", delta: text } });
-    await emit("message_end", { message: { role: "assistant", stopReason: error ? "error" : "stop", errorMessage: error } });
+    await emit("message_end", { message: { role: "assistant", stopReason: error ? "error" : "stop", errorMessage: error, content: [{ type: "text", text }] } });
   }
   async function settle(aborted = false) {
     idle = true;
@@ -88,6 +89,7 @@ test("real socket discovery, explicit attachment, streaming and terminal continu
   const response = f.prompt("Remember emerald-73");
   await until(() => f.submissions.length === 1);
   assert.match(f.submissions[0]!, /Remember emerald-73/);
+  assert(!f.submissions[0]!.includes("[Zed discussion"));
   await f.start();
   await f.reply("Remembered emerald-73");
   await f.settle();
@@ -350,6 +352,89 @@ test("disconnect drops a waiting prompt without touching terminal work", async (
   await delay(70);
   assert.equal(f.submissions.length, 0);
   assert.equal(f.aborts(), 0);
+});
+
+function reviewPrompt(f: Awaited<ReturnType<typeof fixture>>, submissionId: string, sessionId = f.id) {
+  return f.connection.agent.request(acp.methods.agent.session.prompt, {
+    sessionId, prompt: [{ type: "text", text: "[Zed discussion thread-1]\n\nReview /project/example.ts:2-3\nconst answer = 42;\nExplain this.",
+      _meta: { [REVIEW_META_KEY]: { version: 1, threadId: "thread-1", submissionId } } }],
+  });
+}
+
+test("inline replies carry exact IDs and only final completed text after settling", async (t) => {
+  const f = await fixture(t);
+  await f.attach();
+  for (const id of ["submission-1", "submission-2"]) {
+    const count = f.submissions.length;
+    const result = reviewPrompt(f, id);
+    await until(() => f.submissions.length === count + 1);
+    assert.match(f.submissions.at(-1)!, /const answer = 42/);
+    assert.match(f.submissions.at(-1)!, /\[Zed discussion thread-1\]/);
+    assert.equal(f.submissions.at(-1)!.split("[Zed discussion").length, 2);
+    await f.start();
+    await f.reply("intermediate text");
+    await f.emit("agent_end", { messages: [] });
+    await f.reply(`final ${id}`);
+    await f.settle();
+    assert.deepEqual((await result)._meta?.[REVIEW_META_KEY], {
+      version: 1, threadId: "thread-1", submissionId: id, text: `final ${id}`,
+    });
+  }
+});
+
+test("inline review excludes terminal work before dispatch but refuses interleaved replies", async (t) => {
+  const f = await fixture(t);
+  await f.attach();
+  f.setIdle(false);
+  const queued = reviewPrompt(f, "queued");
+  await until(() => f.updates.some(({ update }) => update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" && update.content.text.includes("Waiting")));
+  await f.start("terminal question");
+  await f.reply("terminal answer");
+  await f.settle();
+  await until(() => f.submissions.length === 1);
+  await f.start();
+  await f.reply("review answer");
+  await f.settle();
+  assert.equal(((await queued)._meta?.[REVIEW_META_KEY] as { text: string }).text, "review answer");
+
+  const mixed = assert.rejects(reviewPrompt(f, "mixed"), /cannot safely be assigned/);
+  await until(() => f.submissions.length === 2);
+  await f.start();
+  await f.start("unrelated follow-up");
+  await f.reply("answer to unrelated follow-up");
+  await f.settle();
+  await mixed;
+  assert.equal(f.submissions.length, 2);
+});
+
+test("cancelled reviews carry no inline reply and provider failures remain errors", async (t) => {
+  const f = await fixture(t);
+  await f.attach();
+  const cancelled = reviewPrompt(f, "cancelled");
+  await until(() => f.submissions.length === 1);
+  await f.start();
+  await f.reply("partial response");
+  await f.settle(true);
+  assert.deepEqual(await cancelled, { stopReason: "cancelled" });
+  const failed = assert.rejects(reviewPrompt(f, "failed"), /provider unavailable/);
+  await until(() => f.submissions.length === 2);
+  await f.start();
+  await f.reply("", "provider unavailable");
+  await f.settle();
+  await failed;
+});
+
+test("unattached and malformed inline reviews fail without submitting", async (t) => {
+  const f = await fixture(t);
+  const { sessionId } = await f.connection.agent.request(acp.methods.agent.session.new, { cwd: "/tmp", mcpServers: [] });
+  await assert.rejects(reviewPrompt(f, "unattached", sessionId), /Attach pi-live/);
+  await f.attach();
+  for (const metadata of [null, { version: 2, threadId: "a", submissionId: "b" }, { version: 1, threadId: "", submissionId: "b" }]) {
+    await assert.rejects(f.connection.agent.request(acp.methods.agent.session.prompt, {
+      sessionId: f.id, prompt: [{ type: "text", text: "review", _meta: { [REVIEW_META_KEY]: metadata } }],
+    }), /review metadata/);
+  }
+  assert.equal(f.submissions.length, 0);
 });
 
 test("private directory refuses permissive paths and symlinks; stale endpoints ignored", async (t) => {

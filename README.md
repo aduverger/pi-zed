@@ -10,9 +10,9 @@ Plans: [PR 1 — live attachment](docs/PR-1-live-session-attachment.md) ·
 
 - macOS or Linux; Node.js 22+.
 - Pi **1.5.1** (the API version tested here), with a configured model/provider.
-- Zed supporting custom ACP agents. Zed GUI behavior is not yet manually verified.
+- Zed supporting custom ACP agents. Inline discussions require our custom Zed build.
 - Pi and the ACP adapter on the **same host and OS account**, with the same temporary
-  directory environment. Remote attachment is not implemented.
+  directory environment. For SSH workspaces, Zed runs the adapter remotely alongside pi.
 
 ## Build
 
@@ -38,7 +38,8 @@ For a disposable new session instead:
 pi -e /absolute/path/to/zed_review/dist/extension.js
 ```
 
-After code changes, rebuild and reload pi. Do not load both installation methods at once.
+After extension code changes, rebuild and reload pi. Adapter-only changes require a fresh
+Agent Panel connection, not restarting terminal pi. Do not load both installation methods at once.
 
 ## Configure Zed
 
@@ -77,6 +78,33 @@ Messages submitted during initial discovery wait for it to finish. If no attachm
 they are **not queued or sent**. Attach while pi is idle; a failed automatic attachment shows
 an error and leaves the selection commands available for explicit retry. `/sessions` refreshes
 selection without automatically attaching. Once attached, messages go to pi.
+
+## Persistent inline discussions (custom Zed build)
+
+Select file lines and run **agent: comment with pi live**. Posted comments and paired Pi
+replies are saved on the adapter host, outside the project:
+
+```text
+~/.local/share/zed-pi-review/<canonical-project-path-hash>/<submission-uuid>.json
+```
+
+A completed post also has an immutable `.json.completed` companion containing its outcome.
+An absolute `XDG_DATA_HOME` overrides `~/.local/share`. For SSH workspaces this is on Ubuntu,
+not the Mac. Directories/files are private to the remote OS user (0700/0600). No project
+files or settings changes are needed. Another computer using the same account/project can
+restore them with the updated custom build.
+
+Saved discussions reload on file activation when pi-live is available, or with **agent:
+restore pi reviews** after reconnecting. They appear as **Show discussion** markers. X hides
+only one discussion, without deleting it or cancelling its work. A unique exact code/context
+match is required; outdated/ambiguous discussions remain stored and produce a warning rather
+than attaching to a guessed line.
+
+Comments are saved before dispatch. Restoring unfinished work never resends it; check pi's
+transcript first. Save failures are visible. Draft input, project/file rename recovery,
+manual reattachment, and model-context retrieval after compaction are not implemented.
+Existing comments in an older running Zed build cannot be migrated automatically: copy any
+needed text before quitting it. See [PR 2](docs/PR-2-inline-review-threads.md) for details.
 
 ## Shared-session behavior
 
@@ -146,9 +174,9 @@ the existing terminal process shows the interaction, types a recall question int
 and reconnects to verify history without resubmitting. It does not alter your existing session
 or global configuration. It uses PI_PROVIDER/PI_MODEL when both are set, otherwise pi's default.
 
-Still required before release: manually validate Zed's picker, /attach flow, stop button,
-streaming display and reconnect behavior on your installed Zed/macOS or Linux version.
-Inline review comments are deliberately deferred to PR 2.
+Live attachment and the first inline-review slice have been manually verified on the custom
+Mac/SSH setup. Persistence/restart GUI acceptance and full diff-side review support remain
+outstanding; this is not a released stock-Zed extension.
 
 ## Remove
 
@@ -156,4 +184,5 @@ Inline review comments are deliberately deferred to PR 2.
 pi remove /absolute/path/to/zed_review
 ```
 
-Run /reload in pi and remove the `pi-live` agent entry from Zed. No pi history is deleted.
+Run /reload in pi and remove the `pi-live` agent entry from Zed. No pi history or saved
+review data is deleted.

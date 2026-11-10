@@ -65,7 +65,7 @@ export function installBridge(pi: ExtensionAPI, directory = runtimeDirectory()):
       if (error) request.reject(new acp.RequestError(-32000, error));
       else request.resolve({
         stopReason,
-        ...(request.review ? { _meta: { [REVIEW_META_KEY]: { ...request.review.request, text: request.review.reply ?? "" } } } : {}),
+        ...(request.review && stopReason === "end_turn" ? { _meta: { [REVIEW_META_KEY]: { ...request.review.request, text: request.review.reply ?? "" } } } : {}),
       });
     });
   }

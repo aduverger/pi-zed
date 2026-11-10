@@ -2,12 +2,14 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import * as acp from "@agentclientprotocol/sdk";
 import { promptText, textUpdate } from "./content.js";
+import { reviewRequest } from "./review.js";
+import { accessReviewStore, reviewDataDirectory, REVIEW_STORE_METHOD, storeRequest } from "./review-store.js";
 import { connectSession, discoverSessions, ENDPOINT_ID, initialization, runtimeDirectory } from "./transport.js";
 
 type Attachment = { endpointId: string; connection: acp.ClientConnection };
 type Thread = { cwd: string; attachment?: Attachment; attaching: boolean; discovery?: Promise<void> };
 
-export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
+export function createAdapter(directory = runtimeDirectory(), reviewDirectory = reviewDataDirectory()): acp.AgentApp {
   const threads = new Map<string, Thread>();
   let front: acp.AgentConnection;
 
@@ -87,6 +89,12 @@ export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
         threads.clear();
       });
     })
+    .onRequest(REVIEW_STORE_METHOD, storeRequest, async ({ params }) => {
+      const thread = threads.get(params.sessionId);
+      if (!thread) throw acp.RequestError.sessionNotFound(params.sessionId);
+      try { return await accessReviewStore(thread.cwd, params, reviewDirectory); }
+      catch (error) { throw new acp.RequestError(-32000, `Review storage failed: ${String(error)}`); }
+    })
     .onRequest(acp.methods.agent.initialize, () => initialization)
     .onRequest(acp.methods.agent.session.list, async ({ params }) => ({ sessions: await list(params.cwd) }))
     .onRequest(acp.methods.agent.session.new, async ({ params }) => {
@@ -113,6 +121,7 @@ export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
       await thread.discovery;
       if (thread.attaching) throw new acp.RequestError(-32000, "Attachment is in progress");
       if (!thread.attachment) {
+        if (reviewRequest(params.prompt)) throw new acp.RequestError(-32000, "Attach pi-live before posting an inline review. This comment was not sent.");
         const text = promptText(params.prompt).trim();
         if (text.startsWith("/attach ")) {
           const endpointId = text.slice(8).trim();
