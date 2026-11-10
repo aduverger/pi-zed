@@ -287,6 +287,39 @@ and discussion identity. New real-provider and manual GUI restart acceptance rem
    for overlay creation, not a round trip through display rows, so folds cannot change the
    reviewed range.
 
+### Discussion pointer-event follow-up
+
+The user reported that the lower discussion could not be hidden/reopened, both reopen
+buttons highlighted together, and code behind the discussion received clicks/hover tooltips.
+A real GPUI pointer regression reproduced the lower X failing before the fix. Earlier tests
+only invoked collapse/reopen methods directly and therefore missed the rendered-control bug.
+
+Each expanded/collapsed discussion now scopes its child element IDs under its existing
+prompt-editor entity ID. Both surfaces use GPUI's `block_mouse_except_scroll`, preventing
+code-editor clicks/hover underneath without blocking normal scrolling or nested inputs.
+The comment-section header toggles its captured hunk, not whichever prompt has focus (or
+the first overlay). The submit button likewise focuses/submits its own prompt explicitly.
+Keyboard action behavior remains unchanged.
+
+`cargo test --locked -p editor review --lib` passed 30 tests; the new pointer test hides the
+lower discussion, hides the upper one, reopens the lower one, types in its actual input,
+folds/unfolds its comment section with the source editor focused, clicks its background,
+and submits to the correct discussion. It checks unchanged source text/selections and
+blocked source-editor hover. Both discussions include rendered Pi Markdown replies.
+All 6 agent-UI review tests, `cargo build --locked`, and `git diff --check` also passed.
+Manual acceptance in the running Mac/SSH window is pending; the rebuilt custom Zed needs
+relaunching. No adapter/pi-extension update, protocol change, or saved-data migration is
+required. Snippet repetition in follow-up prompts is unchanged by this UI fix.
+
+#### Pointer-event decision ledger (least-confident first)
+
+1. Preserve the existing keyboard toggle's focused/first-discussion fallback. Only pointer
+   controls gain explicit ownership; changing keyboard semantics is outside this bug fix.
+2. Use `block_mouse_except_scroll` rather than swallowing every event. Inputs and Markdown
+   remain interactive, and wheel scrolling can continue through the existing editor path.
+3. Scope widget state by the existing prompt entity, not line numbers or a new persistent
+   field. That identity survives hiding/reopening and source-line movement.
+
 ### Original slice decision ledger (superseded where noted above)
 
 1. Require the existing configured key `pi-live` for this prototype rather than adding a
