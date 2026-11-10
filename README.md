@@ -17,8 +17,8 @@ Plans: [PR 1 — live attachment](docs/PR-1-live-session-attachment.md) ·
 ## Build
 
 ```sh
-npm ci
-npm run build
+pnpm install
+pnpm build
 ```
 
 ## Load into your existing terminal pi
@@ -62,13 +62,21 @@ Open the same working directory as pi.
 1. Select **pi-live** in the Agent Panel.
 2. Choose a live session from the agent session history, if your Zed version exposes it.
    The name includes the pi process ID.
-3. Alternatively, start a pi-live thread and send **/sessions**. It lists live sessions
-   for that exact directory. Send **/attach <full-id>** to select one.
+3. Alternatively, start a pi-live thread. If exactly one live session matches the canonical
+   working directory, it attaches automatically. Multiple matches are listed for selection;
+   if none match, all live sessions are listed with their working directories.
+   Send **/attach <full-id>** to select one, or **/sessions** to refresh the list.
 4. Send a prompt. The user message and agent response appear in your terminal pi too.
    Terminal-originated user messages and streamed assistant replies also appear in Zed.
 
-A new Zed thread is only a selection screen; it never automatically chooses an agent.
-Messages submitted before attachment are **not queued**. Attach while pi is idle.
+Discovery finds only running pi sessions with this bridge loaded, on the adapter's host
+and OS account—not saved sessions or arbitrary pi processes visible in Rex. Selecting a
+session from another directory is explicit; pi continues operating in its own directory.
+
+Messages submitted during initial discovery wait for it to finish. If no attachment results,
+they are **not queued or sent**. Attach while pi is idle; a failed automatic attachment shows
+an error and leaves the selection commands available for explicit retry. `/sessions` refreshes
+selection without automatically attaching. Once attached, messages go to pi.
 
 ## Shared-session behavior
 
@@ -119,9 +127,9 @@ ACP filesystem, terminal, or MCP delegation; pi's existing configuration remains
 ## Validation
 
 ```sh
-npm run check
-npm test
-npm run build
+pnpm check
+pnpm test
+pnpm build
 ```
 
 Tests use real Unix sockets and the official ACP SDK with controlled pi lifecycle fixtures.
@@ -129,7 +137,7 @@ Tests use real Unix sockets and the official ACP SDK with controlled pi lifecycl
 Optional real-provider acceptance check (uses configured model credentials and consumes tokens):
 
 ```sh
-npm run test:live
+pnpm test:live
 ```
 
 This starts a separate disposable **real pi TUI in a pseudo-terminal**, with no tools, project

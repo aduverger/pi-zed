@@ -5,7 +5,7 @@ import { promptText, textUpdate } from "./content.js";
 import { connectSession, discoverSessions, ENDPOINT_ID, initialization, runtimeDirectory } from "./transport.js";
 
 type Attachment = { endpointId: string; connection: acp.ClientConnection };
-type Thread = { cwd: string; attachment?: Attachment; attaching: boolean };
+type Thread = { cwd: string; attachment?: Attachment; attaching: boolean; discovery?: Promise<void> };
 
 export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
   const threads = new Map<string, Thread>();
@@ -16,25 +16,41 @@ export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
   }
 
   async function list(cwd?: string | null): Promise<acp.SessionInfo[]> {
-    return discoverSessions(directory, cwd ? await realpath(cwd) : undefined);
+    const sessions = await discoverSessions(directory);
+    if (!cwd) return sessions;
+    const canonicalCwd = await realpath(cwd);
+    const matching: acp.SessionInfo[] = [];
+    for (const session of sessions) {
+      if (await realpath(session.cwd).catch(() => undefined) === canonicalCwd) matching.push(session);
+    }
+    return matching.length ? matching : sessions;
   }
 
-  async function selectionHelp(sessionId: string, cwd: string): Promise<void> {
-    const sessions = await list(cwd);
+  async function selectionHelp(sessionId: string, thread: Thread, autoAttach = false): Promise<void> {
+    const sessions = await list(thread.cwd);
+    if (front.signal.aborted || thread.attachment || thread.attaching) return;
+    if (autoAttach && sessions.length === 1 && await realpath(sessions[0]!.cwd).catch(() => undefined) === thread.cwd) {
+      try {
+        await attach(sessionId, thread, sessions[0]!.sessionId);
+        return;
+      } catch (error) {
+        await tell(sessionId, `Automatic attachment failed: ${String(error)}\nChoose a session below to retry explicitly.\n`);
+      }
+    }
     await tell(sessionId, sessions.length
       ? "Choose the existing pi session to attach to:\n\n" + sessions.map((session) =>
         `- ${session.title}: \`/attach ${session.sessionId}\`\n  ${session.cwd}`).join("\n") +
         "\n\nYou can also select a live session from Zed's agent session history. Use /sessions to refresh."
-      : "No live pi sessions for this working directory. Load the bridge extension in your terminal pi, then send /sessions. No new pi process will be started.");
+      : "No live pi sessions found. Load the bridge extension in your terminal pi, then send /sessions. No new pi process will be started.");
     await front.client.notify(acp.methods.client.session.update, {
       sessionId, update: { sessionUpdate: "available_commands_update", availableCommands: [
         { name: "attach", description: "Attach to an existing live pi session", input: { hint: "session ID from /sessions" } },
-        { name: "sessions", description: "List live pi sessions for this working directory" },
+        { name: "sessions", description: "List matching live pi sessions, or all sessions if none match" },
       ] },
     });
   }
 
-  async function attach(sessionId: string, thread: Thread, endpointId: string): Promise<void> {
+  async function attach(sessionId: string, thread: Thread, endpointId: string, cwd = thread.cwd): Promise<void> {
     if (!ENDPOINT_ID.test(endpointId)) throw acp.RequestError.invalidParams(undefined, "Use the complete live session ID from /sessions");
     if (thread.attachment || thread.attaching) throw new acp.RequestError(-32000, "This thread is already attached or attaching");
     thread.attaching = true;
@@ -43,7 +59,7 @@ export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
       connection = await connectSession(directory, endpointId, (notification) =>
         front.client.notify(acp.methods.client.session.update, { ...notification, sessionId }));
       await connection.agent.request(acp.methods.agent.session.load, {
-        sessionId: endpointId, cwd: thread.cwd, mcpServers: [],
+        sessionId: endpointId, cwd, mcpServers: [],
       }, { cancellationSignal: AbortSignal.timeout(10_000), stopWaitingOnCancel: true });
       if (front.signal.aborted) throw new Error("Zed disconnected while attaching");
       thread.attachment = { endpointId, connection };
@@ -77,7 +93,10 @@ export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
       const sessionId = `select-${randomUUID()}`;
       const thread: Thread = { cwd: await realpath(params.cwd), attaching: false };
       threads.set(sessionId, thread);
-      await selectionHelp(sessionId, thread.cwd);
+      // Zed discards updates for sessions it has not received a session/new response for.
+      thread.discovery = new Promise<void>((resolve) => setImmediate(resolve))
+        .then(() => selectionHelp(sessionId, thread, true))
+        .catch((error: unknown) => { front.close(error); });
       return { sessionId };
     })
     .onRequest(acp.methods.agent.session.load, async ({ params }) => {
@@ -91,13 +110,19 @@ export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
     .onRequest(acp.methods.agent.session.prompt, async ({ params, signal }) => {
       const thread = threads.get(params.sessionId);
       if (!thread) throw acp.RequestError.sessionNotFound(params.sessionId);
+      await thread.discovery;
       if (thread.attaching) throw new acp.RequestError(-32000, "Attachment is in progress");
       if (!thread.attachment) {
         const text = promptText(params.prompt).trim();
-        if (text.startsWith("/attach ")) await attach(params.sessionId, thread, text.slice(8).trim());
+        if (text.startsWith("/attach ")) {
+          const endpointId = text.slice(8).trim();
+          const session = (await list()).find((candidate) => candidate.sessionId === endpointId);
+          if (!session) throw acp.RequestError.invalidParams(undefined, "Choose a live session ID from /sessions");
+          await attach(params.sessionId, thread, endpointId, session.cwd);
+        }
         else {
           if (text !== "/sessions") await tell(params.sessionId, "Not attached: your message was not sent or queued. Attach first, then submit it again.\n");
-          await selectionHelp(params.sessionId, thread.cwd);
+          await selectionHelp(params.sessionId, thread);
         }
         return { stopReason: "end_turn" };
       }

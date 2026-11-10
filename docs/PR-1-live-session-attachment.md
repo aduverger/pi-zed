@@ -10,7 +10,8 @@ No new pi process, saved-session resume, Rex integration, or Zed modification.
    Discover only live endpoints; never read credentials or reopen session files.
 3. List live sessions with name, cwd and process identity through ACP session/list.
    session/load attaches to the explicitly chosen endpoint and replays its transcript.
-   New Zed threads provide an explicit /attach command if the client picker is unavailable.
+   New Zed threads automatically attach to a unique canonical-cwd match. Otherwise they
+   list matching sessions, falling back to all live sessions when none match, with /attach.
 4. Submit user text and embedded text context through pi's existing message API.
    Stream assistant text and tool activity. Keep permissions/dialogs in the terminal.
 5. Serialize bridge prompts, wait for terminal work to settle, support cancellation, and
@@ -49,17 +50,44 @@ Node 22, and hot installation/reload in the user's configured session. No graphi
 was available. Fixture tests cover shutdown and failure paths; they are not a claim that
 all pi extensions or terminal permission dialogs have been tested end to end.
 
+## Auto-discovery follow-up
+
+Implemented on `feat/inline-review-threads` before custom Zed work:
+
+- Start a new thread: auto-attach the sole canonical-cwd match; otherwise list matching
+  live sessions, or all live sessions if none match. Never auto-attach a different cwd.
+- The ACP history list uses the same matching/fallback rule. `/sessions` refreshes selection.
+- Send initial notifications after the new-session response so Zed can register the thread.
+- Hold prompts until startup discovery finishes; if unattached, explain that they were not sent.
+- Failed automatic attachment is visible and permits explicit retry; no background retry.
+- `pnpm check`, `pnpm test` (17 tests), and `pnpm build` passed. Tests cover unique/multiple/no
+  matches, canonical symlinks, cross-directory explicit selection, busy failure/retry, empty
+  discovery/refresh, notification ordering, streaming, and existing lifecycle failures.
+- New startup behavior still needs manual Zed verification. No new real-provider smoke run.
+
+### Follow-up decision ledger (least-confident first)
+
+1. Busy unique matches fail visibly and require explicit retry, preserving existing idle-only
+   attachment rather than introducing background waits. Question: should startup wait for idle?
+2. Auto-attach only on new-thread startup; `/sessions` remains a list refresh. Question: should
+   an explicit refresh also auto-attach when one match subsequently appears?
+3. Exact canonical cwd matching treats symlinks as equivalent, but not parent/child paths.
+4. Listing all sessions means all reachable bridge endpoints for this host/user. Rex processes
+   or saved SDK sessions cannot provide the private live connection required for attachment.
+5. Explicit cross-directory `/attach` uses the chosen session's advertised cwd for loading;
+   the extension's cwd validation remains intact, and pi's working directory does not change.
+
 ## Decision ledger
 Implementation choices where the request was silent, least-confident first:
 1. Pi's injection API is fire-and-forget. Use a 30-second startup acknowledgement timeout
    and a visible `[Zed request <uuid>]` marker to correlate the matching run. Input hooks
    must preserve it. Timeouts report uncertain delivery, never resend. Question: should
    pi expose an awaited submission API upstream instead?
-2. New ACP threads are selection shells with /sessions and /attach. They do not submit
-   ordinary messages until explicitly attached. Native session/list + session/load is also
-   exposed. Question: which Zed release and preferred selection UX must be supported?
+2. Originally, new ACP threads required explicit selection. The auto-discovery follow-up
+   below supersedes that choice. Native session/list + session/load remains available.
 3. Attach while idle for a coherent transcript snapshot. Match canonical working directories
-   exactly, rather than guessing between projects/worktrees. Question: should subdirectories
+   exactly for automatic attachment, rather than guessing between projects/worktrees.
+   Explicit /attach may select another cwd. Question: should subdirectories
    also be eligible once there is a concrete workflow for them?
 4. Allow one pending Zed prompt per pi process; wait until terminal work settles rather than
    steering it. Further Zed submissions fail explicitly. Cancelling a waiting prompt only

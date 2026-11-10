@@ -17,9 +17,10 @@ async function until(predicate: () => boolean): Promise<void> {
   throw new Error("Condition did not become true");
 }
 
-async function fixture(t: TestContext) {
-  const root = await mkdtemp("/tmp/zpl-test-");
-  const directory = join(root, "sockets");
+async function fixture(t: TestContext, options: { directory?: string; cwd?: string } = {}) {
+  const temporary = await mkdtemp("/tmp/zpl-test-");
+  const root = options.cwd ?? temporary;
+  const directory = options.directory ?? join(temporary, "sockets");
   const sessionManager = SessionManager.inMemory(root);
   const handlers = new Map<string, ((event: unknown, ctx: ExtensionContext) => unknown)[]>();
   const submissions: string[] = [];
@@ -41,6 +42,7 @@ async function fixture(t: TestContext) {
   const emit = async (type: string, fields: Record<string, unknown> = {}) => {
     for (const handler of handlers.get(type) ?? []) await handler({ type, ...fields }, context);
   };
+  const existingIds = new Set((await discoverSessions(directory)).map((session) => session.sessionId));
   installBridge(pi, directory);
   await emit("session_start");
   const updates: acp.SessionNotification[] = [];
@@ -49,11 +51,11 @@ async function fixture(t: TestContext) {
   }).connect(createAdapter(directory));
   await connection.agent.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION });
   const sessions = (await connection.agent.request(acp.methods.agent.session.list, { cwd: root })).sessions;
-  const id = sessions[0]!.sessionId;
+  const id = sessions.find((session) => !existingIds.has(session.sessionId))!.sessionId;
   t.after(async () => {
     connection.close();
     await emit("session_shutdown");
-    await rm(root, { recursive: true, force: true });
+    await rm(temporary, { recursive: true, force: true });
   });
   const attach = () => connection.agent.request(acp.methods.agent.session.load, { sessionId: id, cwd: root, mcpServers: [] });
   const prompt = (text: string, sessionId = id) => connection.agent.request(acp.methods.agent.session.prompt, {
@@ -99,9 +101,9 @@ test("real socket discovery, explicit attachment, streaming and terminal continu
   assert.equal(f.sessionManager.getBranch().filter((entry) => entry.type === "message").length, 2);
 });
 
-test("new thread never spawns/selects an agent and supports /attach", async (t) => {
+test("no matching cwd lists all sessions and supports explicit cross-directory /attach", async (t) => {
   const f = await fixture(t);
-  const { sessionId } = await f.connection.agent.request(acp.methods.agent.session.new, { cwd: f.root, mcpServers: [] });
+  const { sessionId } = await f.connection.agent.request(acp.methods.agent.session.new, { cwd: "/tmp", mcpServers: [] });
   await f.prompt("hello", sessionId);
   assert.equal(f.submissions.length, 0);
   await f.prompt(`/attach ${f.id}`, sessionId);
@@ -112,6 +114,92 @@ test("new thread never spawns/selects an agent and supports /attach", async (t) 
   await f.settle();
   await response;
   assert(f.updates.every((update) => update.sessionId === sessionId));
+});
+
+test("initial commands arrive after session/new so Zed can register the thread first", async (t) => {
+  const f = await fixture(t);
+  let registeredSessionId: string | undefined;
+  const commands: string[] = [];
+  const connection = acp.client().onNotification(acp.methods.client.session.update, ({ params }) => {
+    if (params.sessionId !== registeredSessionId) return;
+    if (params.update.sessionUpdate === "available_commands_update") {
+      commands.push(...params.update.availableCommands.map((command) => command.name));
+    }
+  }).connect(createAdapter(f.directory));
+  t.after(() => connection.close());
+  await connection.agent.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION });
+  const result = await connection.agent.request(acp.methods.agent.session.new, { cwd: "/tmp", mcpServers: [] });
+  registeredSessionId = result.sessionId;
+  await until(() => commands.includes("sessions"));
+  assert.deepEqual(commands, ["attach", "sessions"]);
+  assert.equal(f.submissions.length, 0);
+});
+
+test("one matching session attaches automatically, including symlink cwd, and streams replies", async (t) => {
+  const f = await fixture(t);
+  const other = await fixture(t, { directory: f.directory });
+  const alias = join(f.root, "alias");
+  await symlink(f.root, alias);
+  const { sessionId } = await f.connection.agent.request(acp.methods.agent.session.new, { cwd: alias, mcpServers: [] });
+  const response = f.prompt("automatically attached", sessionId);
+  await until(() => f.submissions.length === 1);
+  assert.equal(other.submissions.length, 0);
+  await f.start();
+  await f.reply("automatic reply");
+  await f.settle();
+  await response;
+  assert(f.updates.some(({ update }) => update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" && update.content.text.includes("automatic reply")));
+});
+
+test("multiple matching sessions list only matches and do not submit before explicit selection", async (t) => {
+  const f = await fixture(t);
+  const matching = await fixture(t, { directory: f.directory, cwd: f.root });
+  const other = await fixture(t, { directory: f.directory });
+  const listed = (await f.connection.agent.request(acp.methods.agent.session.list, { cwd: f.root })).sessions;
+  assert.deepEqual(new Set(listed.map((session) => session.sessionId)), new Set([f.id, matching.id]));
+  const { sessionId } = await f.connection.agent.request(acp.methods.agent.session.new, { cwd: f.root, mcpServers: [] });
+  await f.prompt("not yet", sessionId);
+  const text = f.updates.map(({ update }) => update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" ? update.content.text : "").join("");
+  assert(text.includes(f.id));
+  assert(text.includes(matching.id));
+  assert(!text.includes(other.id));
+  assert.equal(f.submissions.length + matching.submissions.length + other.submissions.length, 0);
+  await f.prompt(`/attach ${matching.id}`, sessionId);
+  const response = f.prompt("chosen session", sessionId);
+  await until(() => matching.submissions.length === 1);
+  await matching.start();
+  await matching.reply();
+  await matching.settle();
+  await response;
+});
+
+test("busy automatic attachment fails visibly and allows explicit retry", async (t) => {
+  const f = await fixture(t);
+  f.setIdle(false);
+  const { sessionId } = await f.connection.agent.request(acp.methods.agent.session.new, { cwd: f.root, mcpServers: [] });
+  await f.prompt("/sessions", sessionId);
+  assert(f.updates.some(({ update }) => update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" && update.content.text.includes("Automatic attachment failed")));
+  assert.equal(f.submissions.length, 0);
+  f.setIdle(true);
+  await f.prompt(`/attach ${f.id}`, sessionId);
+  const response = f.prompt("retry after idle", sessionId);
+  await until(() => f.submissions.length === 1);
+  await f.start();
+  await f.reply();
+  await f.settle();
+  await response;
+});
+
+test("no living endpoints shows setup instructions, then refresh discovers a newly loaded bridge", async (t) => {
+  const f = await fixture(t);
+  await f.emit("session_shutdown");
+  const { sessionId } = await f.connection.agent.request(acp.methods.agent.session.new, { cwd: f.root, mcpServers: [] });
+  await f.prompt("/sessions", sessionId);
+  assert(f.updates.some(({ update }) => update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" && update.content.text.includes("No live pi sessions found")));
+  const replacement = await fixture(t, { directory: f.directory, cwd: f.root });
+  await f.prompt("/sessions", sessionId);
+  assert(f.updates.some(({ update }) => update.sessionUpdate === "agent_message_chunk" && update.content.type === "text" && update.content.text.includes(replacement.id)));
+  assert.equal(replacement.submissions.length, 0);
 });
 
 test("busy terminal queues a prompt; queued cancellation does not abort terminal", async (t) => {
