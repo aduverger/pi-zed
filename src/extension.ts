@@ -5,6 +5,7 @@ import { realpath } from "node:fs/promises";
 import * as acp from "@agentclientprotocol/sdk";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { historyUpdates, promptText, textUpdate } from "./content.js";
+import { REVIEW_META_KEY, reviewRequest, type ReviewRequest } from "./review.js";
 import { initialization, MAX_MESSAGE_BYTES, privateDirectory, runtimeDirectory, secureSocket, socketPath, socketStream } from "./transport.js";
 
 type Peer = {
@@ -24,6 +25,7 @@ type PendingPrompt = {
   reject: (error: Error) => void;
   timer?: NodeJS.Timeout;
   error?: string;
+  review?: { request: ReviewRequest; reply?: string; interleaved: boolean };
 };
 
 export function installBridge(pi: ExtensionAPI, directory = runtimeDirectory()): void {
@@ -57,9 +59,14 @@ export function installBridge(pi: ExtensionAPI, directory = runtimeDirectory()):
     if (!request) return;
     pending = undefined;
     clearTimeout(request.timer);
+    if (request.review?.interleaved) error ??= "Another user or extension message entered the shared run. The reply remains in the agent transcript but cannot safely be assigned to this review.";
+    if (request.review && stopReason === "end_turn" && request.review.reply === undefined) error ??= "Pi finished without a completed inline review reply. Check the agent transcript before retrying.";
     void request.peer.writes.then(() => {
       if (error) request.reject(new acp.RequestError(-32000, error));
-      else request.resolve({ stopReason });
+      else request.resolve({
+        stopReason,
+        ...(request.review ? { _meta: { [REVIEW_META_KEY]: { ...request.review.request, text: request.review.reply ?? "" } } } : {}),
+      });
     });
   }
 
@@ -135,9 +142,13 @@ export function installBridge(pi: ExtensionAPI, directory = runtimeDirectory()):
           check(params.sessionId);
           if (pending) throw new acp.RequestError(-32000, "Another Zed prompt is pending in this pi session. Wait for it to finish.");
           const text = promptText(params.prompt);
+          const review = reviewRequest(params.prompt);
           if (!context.model) throw new acp.RequestError(-32000, "No model selected in pi. Select one in the terminal first.");
           const result = new Promise<acp.PromptResponse>((resolve, reject) => {
-            pending = { peer, marker: `[Zed request ${randomUUID()}]`, text, phase: "waiting", cancelled: false, resolve, reject };
+            pending = {
+              peer, marker: `[Zed request ${randomUUID()}]`, text, phase: "waiting", cancelled: false, resolve, reject,
+              ...(review ? { review: { request: review, interleaved: false } } : {}),
+            };
           });
           const disconnected = () => {
             if (pending?.peer === peer && pending.phase === "waiting") finish("cancelled");
@@ -185,9 +196,11 @@ export function installBridge(pi: ExtensionAPI, directory = runtimeDirectory()):
     }
   });
   pi.on("message_start", (event) => {
+    if (pending?.phase === "running" && pending.review && event.message.role === "custom") pending.review.interleaved = true;
     if (event.message.role !== "user") return;
     const text = typeof event.message.content === "string" ? event.message.content
       : event.message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n");
+    if (pending?.phase === "running" && pending.review && !text.includes(pending.marker)) pending.review.interleaved = true;
     broadcast(textUpdate(text, "user"), pending && text.includes(pending.marker) ? pending.peer : undefined);
   });
   pi.on("message_update", (event) => {
@@ -196,6 +209,11 @@ export function installBridge(pi: ExtensionAPI, directory = runtimeDirectory()):
   pi.on("message_end", (event) => {
     if (pending?.phase === "running" && event.message.role === "assistant") {
       pending.error = event.message.stopReason === "error" ? event.message.errorMessage ?? "Pi provider failed" : undefined;
+      if (pending.review && !pending.review.interleaved) {
+        pending.review.reply = event.message.stopReason === "stop"
+          ? event.message.content.filter((block) => block.type === "text").map((block) => block.text).join("\n")
+          : undefined;
+      }
     }
   });
   pi.on("tool_execution_start", (event) => broadcast({
