@@ -1,5 +1,38 @@
 # Handoff: build and validate custom Zed on the MacBook
 
+## Laptop continuation status
+
+The baseline build, GUI launch, SSH connection to `alex-dev`, and pi-live attachment were
+confirmed by the user. The first regular-file inline-review slice has now been implemented
+in the sibling Zed checkout; see `PR-2-inline-review-threads.md` for tests, limitations, and
+the decision ledger. The server-state section below is historical, not the current laptop
+working tree: the server drafts were subsequently committed and merged into bridge `main`.
+
+Installed build dependencies: Homebrew rustup/CMake, pinned Rust 1.98.1, the Xcode Metal
+Toolchain component, Zig and cargo-zigbuild for the Linux SSH server. No global Xcode
+selection or shell profile was changed. Logs are in `~/Library/Logs/zed-pi-review/`.
+
+After quitting the previous **custom** Zed instance, launch the updated binary with:
+
+```sh
+cd /Users/alex/code/aduverger/zed-pi-review
+PATH="/opt/homebrew/opt/rustup/bin:$PATH" \
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer \
+ZED_RELEASE_CHANNEL=dev \
+./target/debug/zed \
+  --user-data-dir '/Users/alex/Library/Application Support/ZedPiReview' \
+  /Users/alex/code/aduverger/zed-review-scratch
+```
+
+The release tag defaults to the stable channel even in a debug build, which initially
+exited with `zed is already running`. The runtime development-channel override permits
+side-by-side launch; a separate data directory avoids sharing the installed app's database.
+The source remains based on the pinned stable commit. Rebuild with `cargo build --locked`
+using the same PATH and DEVELOPER_DIR (the runtime channel override is not needed to build).
+
+Manual acceptance of the **new inline-review UI** is still pending. Ensure the remote pi
+bridge has been built with review-metadata support and reloaded before testing it.
+
 ## Instructions for the laptop pi session
 
 Take ownership of the macOS Zed build and GUI validation for our inline-review work. First prove an **unmodified pinned Zed build** works, including SSH and our existing live pi attachment. Do not start implementing the whole review feature before this baseline passes.

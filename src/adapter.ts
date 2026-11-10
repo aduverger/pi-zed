@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
 import * as acp from "@agentclientprotocol/sdk";
 import { promptText, textUpdate } from "./content.js";
+import { reviewRequest } from "./review.js";
 import { connectSession, discoverSessions, ENDPOINT_ID, initialization, runtimeDirectory } from "./transport.js";
 
 type Attachment = { endpointId: string; connection: acp.ClientConnection };
@@ -113,6 +114,7 @@ export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
       await thread.discovery;
       if (thread.attaching) throw new acp.RequestError(-32000, "Attachment is in progress");
       if (!thread.attachment) {
+        if (reviewRequest(params.prompt)) throw new acp.RequestError(-32000, "Attach pi-live before posting an inline review. This comment was not sent.");
         const text = promptText(params.prompt).trim();
         if (text.startsWith("/attach ")) {
           const endpointId = text.slice(8).trim();
