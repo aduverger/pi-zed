@@ -1,5 +1,29 @@
 # Handoff: build and validate custom Zed on the MacBook
 
+## Current persistence continuation
+
+Remote user-level review storage is implemented in the custom Zed and bridge. Details and
+the decision ledger are in `PR-2-inline-review-threads.md` (the older sections below are
+historical). The adapter stores private records under `~/.local/share/zed-pi-review/` on
+its host, or under an absolute `XDG_DATA_HOME`; no files are added to reviewed projects.
+
+The Ubuntu bridge checkout is now on local branch `feat/remote-review-storage`, commit
+`122039b`, with the current source/tests applied and `dist/` rebuilt. `pnpm check`, all 27
+tests (including actual CLI restart), and `pnpm build` passed on Ubuntu and macOS. Nothing
+was pushed. Terminal pi was not restarted, and Zed settings/credentials were not changed.
+The storage path needs a fresh adapter connection; an older running adapter cannot acquire
+the new RPC method. Reloading terminal pi is not required for storage itself.
+
+The custom Mac binary is rebuilt. Copy any comments needed from an older running build
+before quitting: those memory-only comments are not migrated. Relaunch using the command
+below, open the SSH project, and create/reconnect a pi-live Agent Panel thread. Discussions
+restore on file activation once the adapter is available, or via **agent: restore pi reviews**.
+Post a new comment, wait for its reply, close/reopen the file, then restart the custom app
+and restore again. Also verify that changed/ambiguous code produces a warning without
+moving the saved discussion to a guessed line. These manual GUI checks are still pending.
+
+Logs: `~/Library/Logs/zed-pi-review/persistence-{editor-tests,agent-tests,acp-tests,build}.log`.
+
 ## Laptop continuation status
 
 The baseline build, GUI launch, SSH connection to `alex-dev`, and pi-live attachment were

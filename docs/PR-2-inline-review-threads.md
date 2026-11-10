@@ -3,8 +3,9 @@
 Status: regular-file vertical slice manually confirmed by the user. Separate authored replies,
 Markdown, stable discussions, and queued posting are implemented locally; manual acceptance
 of these refinements is pending.
-Diff-side anchoring and persistence are not implemented. PR 1 attachment and the unmodified
-custom macOS build/SSH connection were confirmed by the user.
+Remote user-level persistence is implemented locally; GUI restart acceptance is pending.
+Diff-side anchoring remains unimplemented. PR 1 attachment and the unmodified custom
+macOS build/SSH connection were confirmed by the user.
 
 ## Outcome
 Post a comment on selected file/diff lines, automatically send it to the selected live pi
@@ -30,8 +31,9 @@ The bridge changes live in this repository on `feat/regular-file-review`.
      excerpt/context for persistence;
    - correct mapping for staged/unstaged views, deleted lines and renamed files.
    Resolve only unique matches after reopening; never silently jump to a similar line.
-4. Persist threads and replies through Zed's workspace persistence. Do not put annotations
-   into source files. Keep original excerpts when code changes.
+4. Persist posted discussions on the adapter host in remote user-level storage (the user's
+   accepted choice supersedes the original local-workspace-DB proposal). Do not put files in
+   the project. Keep original excerpts when code changes.
 5. Posting automatically queues for the selected live session. Carry discussion and submission IDs
    through an explicit, versioned ACP extension shared with PR 1's bridge. Do not infer
    reply ownership from prose or from whichever editor is focused.
@@ -56,8 +58,8 @@ or a replacement review panel.
 
 ## Remaining decisions for full PR 2
 - Upstream contribution versus maintained fork (the stable release/custom build is approved).
-- Thread retention scope (workspace-local proposed), deletion/resolution UX, and handling
-  multiple-file selections (split versus reject).
+- Deletion/resolution UX and handling multiple-file selections (split versus reject).
+  Storage scope is decided: remote OS user, partitioned by canonical project path.
 - Queue coordination across multiple independently attached Zed threads/processes (currently
   one FIFO per attached Agent Panel thread; the bridge still permits one pending request).
 - How to expose cancellation of the shared agent when terminal work may also be affected.
@@ -102,7 +104,8 @@ The model-visible prompt also contains `[Zed discussion <id>]`, derived from the
 Pi can associate follow-ups with earlier turns in its existing session context; the entire
 history is not pasted into each request. An ID is not history retrieval: compaction or a
 session switch can lose earlier context, and no retrieval mechanism is implemented yet.
-Zed builds this prompt header; the existing remote bridge needs no runtime update.
+Zed builds this prompt header; that refinement alone needed no bridge update. The persistence
+feature described below does require an updated adapter.
 
 A successful `end_turn` prompt response returns those IDs plus `text` under the same key.
 Missing/mismatched metadata, disconnection, or provider failure produces an inline error;
@@ -111,10 +114,10 @@ and responds only after `agent_settled`. User/custom-message interleaving during
 causes an attribution error rather than putting an unrelated answer under the code.
 
 Buffer anchors preserve the selection across edits before it. Changed selected text renders
-an **Outdated** warning with the original excerpt and retains the reply. This is an in-memory
-prototype: closing the editor or restarting Zed loses comments. There is no persistent
-thread store, history retrieval after compaction, retry reconciliation, diff-side support,
-rename/reopen reanchoring, or reattachment UI yet. **This does not complete PR 2.**
+an **Outdated** warning with the original excerpt and retains the reply. The first slice was
+memory-only; the remote persistence section below now describes saving and restoring posted
+comments. History retrieval after compaction, retry reconciliation, diff-side support,
+rename recovery, and reattachment UI remain unimplemented. **This does not complete PR 2.**
 
 ### Queue ownership and safety
 
@@ -134,7 +137,8 @@ On a running failure/cancellation, queued comments are retained in the editor bu
 **Not sent** and removed from the execution queue. They are not auto-retried or automatically
 resumed by later posts. Check the transcript before reposting. Cancelling an individual
 queued comment removes only that job and leaves FIFO order intact. Closing a source editor
-before dispatch drops its unsent jobs; all comments/queues remain in-memory.
+before dispatch drops its unsent jobs when the queue is next pumped and records them as
+**Not sent**. The execution queue remains in memory; posted comments are saved remotely.
 
 ### Validation
 
@@ -203,6 +207,85 @@ with the remote project. No persistence migration or background storage mechanis
    behavior as part of this targeted fix. Their removal of overlays is not comment deletion.
 4. Proposed persistence is workspace-local/file-keyed, following Zed's existing file-fold
    storage, but the user must confirm whether remote-project sharing is desired.
+
+### Remote user-level persistence
+
+The user approved storing discussions on Ubuntu outside project directories, rather than
+in the Mac's workspace DB or a repository `.zed/` directory. The adapter now handles the
+versioned `_zed-pi-live/review-store` ACP extension directly. Reads/writes do not invoke pi,
+create another agent, send a model prompt, or interrupt an active ACP turn.
+
+Storage: `$XDG_DATA_HOME/zed-pi-review/<sha256(canonical-project-cwd)>/<submission-uuid>.json`,
+falling back to `~/.local/share/zed-pi-review/`. Each post contains the discussion ID, source
+path, original lines/excerpt, up to two context lines on each side, comment, timestamp, outcome,
+and paired Pi reply. The original post is immutable; its final snapshot is published once in
+`<submission-uuid>.json.completed`. Readers combine the two, rejecting inconsistent source
+metadata. This also prevents simultaneous completion requests from replacing each other.
+Directories are private (0700); files are private (0600). UUID validation,
+no-follow reads, owner/mode checks, bounded records/responses, and atomic publication protect
+the store. Different posts use different files, including concurrent follow-ups to one
+shared discussion; initial creation cannot overwrite an existing post. A post's original
+source/comment are immutable, and a terminal outcome cannot be replaced through this API.
+
+Zed saves each post before it can leave the existing FIFO. Cancellation while saving still
+removes the job immediately; its final stored cancellation waits for the initial write.
+Save failures are shown inline and in a workspace toast, never retried automatically.
+Finished replies are saved even when their source editor has closed. If Zed exits before
+receiving/saving an outcome, the record remains pending; restoring it says interrupted or
+possibly running elsewhere, with no automatic resend or queue recovery.
+
+Restoration runs when activating a regular file with a pi-live thread available, before the
+comment action opens its input, and via **agent: restore pi reviews**. If the Agent Panel
+was not ready when a file opened, use that action after reconnecting. Restored discussions
+appear as collapsed **Show discussion** markers. Repeated loads deduplicate by submission
+ID, can refresh outcomes for previously restored pending records, and preserve stable
+discussion IDs for follow-ups. Storage remains independent of the selected live pi session,
+but requires an active adapter connection. It does not restore pi's model context after
+compaction/session switching.
+
+Only a unique exact context match is reattached, including after lines move. Changed,
+deleted, ambiguous, or conflicting ranges are reported as outdated/unattachable and remain
+intact on disk. There is no guessed line fallback and no reattachment UI yet; unmatched
+history is not rendered under arbitrary code. Project/file renames require manual migration
+for now. Posted comments and replies persist; unsubmitted drafts and collapsed/open UI state
+do not. Existing comments in an already-running older Zed binary are not migrated—copy any
+needed text before quitting it.
+
+Validation on macOS and Ubuntu: `pnpm check`, all 27 bridge tests, `pnpm build`; on macOS,
+all 29 editor review
+tests, 6 agent-UI review tests, the ACP extension round-trip/error test, and
+`cargo build --locked` passed. Coverage includes an actual CLI process restart with a real
+user-level file store, no project files, separate projects/symlink cwd, concurrent posts,
+corruption/unsafe paths, initial-save failure without dispatch, cancellation during saving,
+fresh-editor restoration, folded/shifted/ambiguous/overlapping anchors, authored replies, refresh,
+and discussion identity. New real-provider and manual GUI restart acceptance remain pending.
+
+#### Persistence decision ledger (least-confident first)
+
+1. Outdated/unmatched saved discussions stay on disk and produce a visible warning instead
+   of getting a guessed inline location. A dedicated orphan/reattachment UI is still deferred.
+   If asking were free: should that UI be the next slice?
+2. Zed writes the completed reply; quitting before its response/save leaves an uncertain
+   pending record, not a recoverable execution queue. Check terminal history before reposting.
+3. Persist posted comments, not unfinished input drafts or open/closed overlay state. Restore
+   markers collapsed to avoid reopening large overlays unexpectedly.
+4. Use immutable per-submission post/completion files rather than a shared mutable discussion
+   file. Exclusive atomic publication prevents both lost follow-ups and conflicting terminal
+   outcomes, without locks, background workers, or retry queues. There are no shared edit/delete
+   operations or live cross-client synchronization.
+5. Use the adapter's canonical session cwd as project identity and absolute host file paths.
+   Separate clones/paths remain separate; moving a project/file is not guessed automatically.
+6. Use the existing ACP connection's standard underscore-prefixed extension mechanism, not
+   model prompts or a second SSH subprocess. Older adapters fail visibly and need updating.
+7. Retain data indefinitely until explicitly removed; do not introduce automatic cleanup,
+   retention settings, or a local duplicate database. Existing storage is private to the
+   remote OS account, not protected from processes already running as that user.
+8. Bound each stored record and each list response to 4 MiB, below the existing 8 MiB ACP
+   transport limit. Exceeding the limit fails visibly; no truncation or pagination is invented.
+9. Capture up to two complete context lines on each side and require a unique exact match;
+   nearby edits can deliberately make restoration conservative. Reuse source anchors directly
+   for overlay creation, not a round trip through display rows, so folds cannot change the
+   reviewed range.
 
 ### Original slice decision ledger (superseded where noted above)
 

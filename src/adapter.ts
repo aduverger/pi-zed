@@ -3,12 +3,13 @@ import { realpath } from "node:fs/promises";
 import * as acp from "@agentclientprotocol/sdk";
 import { promptText, textUpdate } from "./content.js";
 import { reviewRequest } from "./review.js";
+import { accessReviewStore, reviewDataDirectory, REVIEW_STORE_METHOD, storeRequest } from "./review-store.js";
 import { connectSession, discoverSessions, ENDPOINT_ID, initialization, runtimeDirectory } from "./transport.js";
 
 type Attachment = { endpointId: string; connection: acp.ClientConnection };
 type Thread = { cwd: string; attachment?: Attachment; attaching: boolean; discovery?: Promise<void> };
 
-export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
+export function createAdapter(directory = runtimeDirectory(), reviewDirectory = reviewDataDirectory()): acp.AgentApp {
   const threads = new Map<string, Thread>();
   let front: acp.AgentConnection;
 
@@ -87,6 +88,12 @@ export function createAdapter(directory = runtimeDirectory()): acp.AgentApp {
         for (const thread of threads.values()) thread.attachment?.connection.close();
         threads.clear();
       });
+    })
+    .onRequest(REVIEW_STORE_METHOD, storeRequest, async ({ params }) => {
+      const thread = threads.get(params.sessionId);
+      if (!thread) throw acp.RequestError.sessionNotFound(params.sessionId);
+      try { return await accessReviewStore(thread.cwd, params, reviewDirectory); }
+      catch (error) { throw new acp.RequestError(-32000, `Review storage failed: ${String(error)}`); }
     })
     .onRequest(acp.methods.agent.initialize, () => initialization)
     .onRequest(acp.methods.agent.session.list, async ({ params }) => ({ sessions: await list(params.cwd) }))
