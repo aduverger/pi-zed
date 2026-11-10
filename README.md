@@ -1,10 +1,6 @@
 # Zed ↔ live pi
 
-Attach Zed's existing Agent Panel to a **running terminal pi process**. The adapter never
-starts pi, opens a saved session, or uses Rex. This is a local prototype, not a Zed UI extension.
-
-Plans: [PR 1 — live attachment](docs/PR-1-live-session-attachment.md) ·
-[PR 2 — inline review threads](docs/PR-2-inline-review-threads.md).
+Attach Zed's existing Agent Panel to a **running terminal pi process**. The adapter never starts pi, opens a saved session. This is a local prototype, not a Zed UI extension.
 
 ## Requirements
 
