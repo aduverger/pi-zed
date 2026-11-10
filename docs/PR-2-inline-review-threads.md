@@ -80,9 +80,11 @@ The source path is absolute on the file's host, including SSH files. The request
 full selected lines, one-based line numbers, and the current editor snapshot (which may
 contain unsaved edits). A selection ending at column zero excludes that next line.
 Diff/multibuffer editors and multiple selections are rejected. A caret reviews its line.
-If an open overlay starts on the same line but covers another range, close it before opening
-the new range. Reopen the action on the original range to recover a dismissed overlay while
-the editor remains open.
+If an overlay already starts on the same line but covers another range, reopen that discussion
+or choose a different starting line; native grouping is still per start line. Reopen the action
+on the original range to recover a dismissed overlay while the editor remains open.
+The X now hides only its own discussion behind a **Show discussion** marker. The marker
+reopens the existing comments, replies, and input draft; hiding does not cancel queued work.
 
 The existing editor review overlay stores the comment and renders the final reply. The
 agent integration captures the active pi-live thread when the overlay opens and uses
@@ -173,6 +175,34 @@ before dispatch drops its unsent jobs; all comments/queues remain in-memory.
    nothing. Running cancellation stays in the Agent Panel and can affect shared terminal work.
 8. Original selected-agent capture remains unchanged. Pending work retains its target even if
    the Agent Panel selection changes. Editor closure discards unsent local work.
+
+### Close-button follow-up
+
+Implemented and built locally; manual acceptance pending. `cargo test --locked -p editor
+review --lib` passed all 27 tests, including a regression that keeps a second discussion
+open, preserves a draft, does not invoke queued cancellation, and accepts a reply while the
+first discussion is hidden. `cargo build --locked` and `git diff --check` passed.
+
+This is **not disk persistence**. Closing the editor/restarting Zed still loses the in-memory
+comments. The existing generic Escape/dismiss-all behavior is unchanged; if it removes the
+markers, the comment data remains in memory and the action can reopen the original range.
+
+Persistence investigation: `crates/editor/src/persistence.rs` already uses workspace/file
+keys for `file_folds`, specifically to survive tab closure and editor-row cleanup. That is
+the proposed pattern for review storage too. Storage location/retention scope still needs
+confirmation before adding the schema: local Zed workspace DB on the Mac versus data shared
+with the remote project. No persistence migration or background storage mechanism was added.
+
+#### Close-button decision ledger (least-confident first)
+
+1. Preserve native per-start-line grouping for now. A different range starting on a line
+   with a retained discussion is rejected explicitly rather than moving that discussion.
+2. The X means collapse, not delete; the same block becomes a reopen marker. It retains
+   input drafts and callbacks, so closing UI cannot cancel or orphan in-flight work.
+3. Keep Escape/dismiss-all semantics unchanged rather than changing global editor keyboard
+   behavior as part of this targeted fix. Their removal of overlays is not comment deletion.
+4. Proposed persistence is workspace-local/file-keyed, following Zed's existing file-fold
+   storage, but the user must confirm whether remote-project sharing is desired.
 
 ### Original slice decision ledger (superseded where noted above)
 
